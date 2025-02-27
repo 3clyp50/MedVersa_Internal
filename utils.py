@@ -20,6 +20,7 @@ import time
 import ipdb
 import os
 import pydicom
+import traceback
 try:
     import SimpleITK as sitk
 except ImportError:
@@ -203,26 +204,76 @@ def resize_back_volume_abd(img, target_size):
     return img
 
 def resize_volume_abd(img):
-    img[img<=-200] = -200
-    img[img>=300] = 300
-
+    """
+    Resize a 3D volume to standard dimensions for processing
+    
+    Parameters:
+    img (numpy.ndarray): 3D volume with shape [depth, height, width] or [height, width, depth]
+    
+    Returns:
+    numpy.ndarray: Resized volume
+    """
+    # Apply windowing for CT if needed
+    if img.dtype != np.uint8:
+        img[img<=-200] = -200
+        img[img>=300] = 300
+    
+    # Define target dimensions
     desired_depth = 64
     desired_width = 192
     desired_height = 192
-
-    current_width = img.shape[0] # [w, h, d]
+    
+    # Detect volume orientation
+    # DICOM volumes typically have shape [frames, height, width]
+    # but need to confirm the orientation
+    volume_shape = img.shape
+    print(f"Original volume shape: {volume_shape}")
+    
+    if len(volume_shape) != 3:
+        print(f"WARNING: Expected 3D volume, got shape {volume_shape}")
+        if len(volume_shape) == 2:
+            # Handle 2D image as a single slice
+            print("Converting 2D image to 3D volume with single slice")
+            img = np.expand_dims(img, 0)
+            volume_shape = img.shape
+    
+    # Determine likely orientation based on shape
+    # Use heuristic: smallest dimension is usually depth for medical volumes
+    smallest_dim = np.argmin(volume_shape)
+    
+    # Reorganize as needed to get [width, height, depth] for resize_volume_abd
+    if smallest_dim == 0:
+        # Likely [depth, height, width], rotate to [width, height, depth]
+        img = np.transpose(img, (2, 1, 0))
+        print(f"Transposed: depth first -> width first, new shape: {img.shape}")
+    elif smallest_dim == 2:
+        # Already in correct [width, height, depth] orientation
+        pass
+    else:
+        # Unusual orientation, try to fix, maybe [height, width, depth]
+        if volume_shape[0] > volume_shape[2] and volume_shape[1] > volume_shape[2]:
+            # Likely [height, width, depth] ordering
+            img = np.transpose(img, (1, 0, 2))
+            print(f"Transposed: height first -> width first, new shape: {img.shape}")
+    
+    # Now img should be in [width, height, depth] format
+    current_width = img.shape[0]
     current_height = img.shape[1]
     current_depth = img.shape[2]
  
-    depth = current_depth / desired_depth
-    width = current_width / desired_width
-    height = current_height / desired_height
+    # Calculate scaling factors
+    depth_factor = desired_depth / current_depth
+    width_factor = desired_width / current_width
+    height_factor = desired_height / current_height
     
-    depth_factor = 1 / depth
-    width_factor = 1 / width
-    height_factor = 1 / height
-
+    print(f"Scaling volume: width: {current_width}->{desired_width}, " + 
+          f"height: {current_height}->{desired_height}, " + 
+          f"depth: {current_depth}->{desired_depth}")
+        
+    # Resize
     img = ndimage.zoom(img, (width_factor, height_factor, depth_factor), order=0)
+    print(f"Resized volume shape: {img.shape}")
+    
     return img
 
 def load_and_preprocess_image(image):
@@ -256,6 +307,22 @@ def load_and_preprocess_dicom(dicom_path, is_series=False):
     Returns:
     torch.Tensor: Preprocessed image tensor ready for model input
     """
+    # If is_series is True but dicom_path is a file, check if it's a volume DICOM file
+    if is_series and os.path.isfile(dicom_path):
+        try:
+            dicom = pydicom.dcmread(dicom_path)
+            # Check if this is a multi-frame DICOM with 3D data
+            if hasattr(dicom, 'NumberOfFrames') and int(dicom.NumberOfFrames) > 1:
+                print(f"Detected single DICOM volume file with {dicom.NumberOfFrames} frames")
+                return load_and_preprocess_dicom_volume(dicom_path)
+            else:
+                # Fall back to directory-based processing
+                print("DICOM file doesn't contain multiple frames, treating as non-series")
+                is_series = False
+        except Exception as e:
+            print(f"Error checking DICOM volume: {str(e)}, treating as non-series")
+            is_series = False
+    
     if is_series:
         return load_and_preprocess_dicom_series(dicom_path)
     else:
@@ -274,48 +341,101 @@ def load_and_preprocess_dicom_image(dicom_path):
     # Read DICOM file
     try:
         dicom = pydicom.dcmread(dicom_path)
+        print(f"DICOM info - Shape: {dicom.pixel_array.shape}, Type: {dicom.pixel_array.dtype}")
     except Exception as e:
         raise ValueError(f"Error reading DICOM file: {str(e)}")
     
-    # Extract pixel data
-    pixel_array = dicom.pixel_array
-    
-    # Apply windowing for CT/MRI if needed and window center/width are available
-    if hasattr(dicom, 'WindowCenter') and hasattr(dicom, 'WindowWidth'):
-        window_center = dicom.WindowCenter
-        window_width = dicom.WindowWidth
+    # Extract and normalize pixel data
+    try:
+        pixel_array = dicom.pixel_array
         
-        # Handle multiple window settings (use first one if list)
-        if isinstance(window_center, pydicom.multival.MultiValue):
-            window_center = window_center[0]
-        if isinstance(window_width, pydicom.multival.MultiValue):
-            window_width = window_width[0]
+        # Handle different shapes
+        if len(pixel_array.shape) == 3 and pixel_array.shape[0] == 1:
+            # Handle single slice 3D data (1, H, W)
+            pixel_array = pixel_array[0]
+        elif len(pixel_array.shape) == 3 and pixel_array.shape[-1] <= 4:
+            # Handle RGB/RGBA data
+            if pixel_array.shape[-1] == 4:  # RGBA
+                pixel_array = pixel_array[..., :3]  # Drop alpha channel
+        elif len(pixel_array.shape) > 3:
+            # Try to handle unusual formats by taking a relevant slice
+            pixel_array = pixel_array.reshape(-1, pixel_array.shape[-2], pixel_array.shape[-1])[0]
             
-        # Apply windowing
-        lower_bound = window_center - window_width // 2
-        upper_bound = window_center + window_width // 2
-        pixel_array = np.clip(pixel_array, lower_bound, upper_bound)
-        pixel_array = (pixel_array - lower_bound) / (window_width)
-        pixel_array = (pixel_array * 255).astype(np.uint8)
-    
-    # Check bit depth and rescale if needed
-    if dicom.BitsStored > 8:
-        # Normalize to 8 bits if no windowing applied earlier
-        if not (hasattr(dicom, 'WindowCenter') and hasattr(dicom, 'WindowWidth')):
-            pixel_min = pixel_array.min()
-            pixel_max = pixel_array.max()
+        # Ensure 2D array
+        if len(pixel_array.shape) == 1:
+            # Handle 1D arrays (unusual, but possible)
+            side_length = int(np.sqrt(pixel_array.shape[0]))
+            pixel_array = pixel_array[:side_length*side_length].reshape(side_length, side_length)
+        
+        # Apply windowing for CT/MRI if needed and window center/width are available
+        if hasattr(dicom, 'WindowCenter') and hasattr(dicom, 'WindowWidth'):
+            window_center = dicom.WindowCenter
+            window_width = dicom.WindowWidth
+            
+            # Handle multiple window settings (use first one if list)
+            if isinstance(window_center, pydicom.multival.MultiValue):
+                window_center = window_center[0]
+            if isinstance(window_width, pydicom.multival.MultiValue):
+                window_width = window_width[0]
+                
+            # Apply windowing
+            lower_bound = window_center - window_width // 2
+            upper_bound = window_center + window_width // 2
+            pixel_array = np.clip(pixel_array, lower_bound, upper_bound)
+            pixel_array = (pixel_array - lower_bound) / (window_width)
+        else:
+            # If no windowing parameters, normalize based on min/max
+            pixel_min = float(np.min(pixel_array))
+            pixel_max = float(np.max(pixel_array))
             if pixel_max > pixel_min:  # Avoid division by zero
-                pixel_array = ((pixel_array - pixel_min) / (pixel_max - pixel_min) * 255).astype(np.uint8)
-    
-    # Convert to RGB if grayscale
-    if len(pixel_array.shape) == 2:
-        pixel_array = np.stack([pixel_array] * 3, axis=2)
-    
-    # Convert to PIL Image
-    image = Image.fromarray(pixel_array)
-    
-    # Process using the existing image processing pipeline
-    return load_and_preprocess_image(image)
+                pixel_array = (pixel_array - pixel_min) / (pixel_max - pixel_min)
+            
+        # Apply full dynamic range
+        pixel_array = (pixel_array * 255).astype(np.uint8)
+        
+        # Convert to RGB if grayscale
+        if len(pixel_array.shape) == 2:
+            pixel_array = np.stack([pixel_array] * 3, axis=2)
+            
+        # Ensure minimum size for very small images
+        if pixel_array.shape[0] < 32 or pixel_array.shape[1] < 32:
+            pixel_array = cv2.resize(pixel_array, (max(32, pixel_array.shape[1]), max(32, pixel_array.shape[0])))
+        
+        # Convert to PIL Image
+        image = Image.fromarray(pixel_array)
+        
+        # Process using the existing image processing pipeline
+        return load_and_preprocess_image(image)
+        
+    except Exception as e:
+        print(f"DICOM processing error: {str(e)}")
+        print(f"DICOM details: {dicom_path}")
+        if hasattr(dicom, 'pixel_array'):
+            print(f"Pixel array shape: {dicom.pixel_array.shape}, dtype: {dicom.pixel_array.dtype}")
+        traceback.print_exc()
+        
+        # Fallback approach - try to read with alternative method
+        try:
+            # Try using SimpleITK if available
+            if 'sitk' in globals():
+                sitk_image = sitk.ReadImage(dicom_path)
+                np_array = sitk.GetArrayFromImage(sitk_image)[0]  # Get first slice if 3D
+                
+                # Normalize and convert to 8-bit
+                np_array = np.clip(np_array, np.percentile(np_array, 1), np.percentile(np_array, 99))
+                np_array = ((np_array - np_array.min()) / (np_array.max() - np_array.min()) * 255).astype(np.uint8)
+                
+                # Convert to RGB
+                if len(np_array.shape) == 2:
+                    np_array = np.stack([np_array] * 3, axis=2)
+                    
+                image = Image.fromarray(np_array)
+                return load_and_preprocess_image(image)
+            else:
+                raise ValueError("SimpleITK not available for fallback processing")
+        except Exception as fallback_error:
+            print(f"Fallback DICOM processing failed: {str(fallback_error)}")
+            raise ValueError(f"Could not process DICOM image: {str(e)}, fallback also failed: {str(fallback_error)}")
 
 def load_and_preprocess_dicom_series(dicom_dir):
     """
@@ -372,6 +492,75 @@ def load_and_preprocess_dicom_series(dicom_dir):
     
     except Exception as e:
         raise ValueError(f"Error processing DICOM series: {str(e)}")
+
+def load_and_preprocess_dicom_volume(dicom_path):
+    """
+    Load and preprocess a single DICOM file containing a 3D volume
+    
+    Parameters:
+    dicom_path (str): Path to a DICOM file containing multiple frames
+    
+    Returns:
+    torch.Tensor: Preprocessed volume tensor ready for model input
+    """
+    try:
+        # Load the DICOM dataset
+        dicom = pydicom.dcmread(dicom_path)
+        print(f"DICOM volume info - Path: {dicom_path}")
+        print(f"  - Has NumberOfFrames: {hasattr(dicom, 'NumberOfFrames')}")
+        if hasattr(dicom, 'NumberOfFrames'):
+            print(f"  - NumberOfFrames: {dicom.NumberOfFrames}")
+        print(f"  - Has PixelData: {hasattr(dicom, 'PixelData')}")
+        print(f"  - Modality: {dicom.Modality if hasattr(dicom, 'Modality') else 'Unknown'}")
+        
+        # Check if it has multiple frames
+        if not hasattr(dicom, 'NumberOfFrames') or int(dicom.NumberOfFrames) <= 1:
+            raise ValueError(f"DICOM file doesn't contain multiple frames")
+        
+        # Verify pixel data exists
+        if not hasattr(dicom, 'pixel_array'):
+            raise ValueError("DICOM file doesn't contain pixel data")
+            
+        # Extract the 3D volume from the pixel_array
+        # DICOM multi-frame will have shape (frames, height, width)
+        volume = dicom.pixel_array
+        print(f"  - Pixel array shape: {volume.shape}, dtype: {volume.dtype}")
+        
+        # Apply windowing if available
+        if hasattr(dicom, 'WindowCenter') and hasattr(dicom, 'WindowWidth'):
+            window_center = dicom.WindowCenter
+            window_width = dicom.WindowWidth
+            if isinstance(window_center, pydicom.multival.MultiValue):
+                window_center = window_center[0]
+            if isinstance(window_width, pydicom.multival.MultiValue):
+                window_width = window_width[0]
+            print(f"  - Applying windowing: center={window_center}, width={window_width}")
+            volume = window_scan(volume, window_center, window_width)
+        else:
+            print("  - No windowing parameters found, using default processing")
+        
+        # Handle volume with a single slice or 3D shape
+        if len(volume.shape) == 2:
+            print("  - Converting 2D volume to 3D by adding dimension")
+            volume = np.expand_dims(volume, 0)  # Add a dimension to make it 3D
+        
+        # Process the volume
+        print(f"  - Processing volume with shape: {volume.shape}")
+        volume = resize_volume_abd(volume)
+        print(f"  - After resizing: {volume.shape}")
+        volume_tensor = torch.from_numpy(volume).permute(2, 0, 1)
+        print(f"  - After permute: {volume_tensor.shape}")
+        transform = tio.Compose([
+            tio.ZNormalization(masking_method=tio.ZNormalization.mean),
+        ])
+        volume_tensor = transform(volume_tensor.unsqueeze(0)).type(torch.bfloat16)
+        print(f"  - Final tensor shape: {volume_tensor.shape}")
+        return volume_tensor
+    
+    except Exception as e:
+        print(f"Error processing DICOM volume: {str(e)}")
+        traceback.print_exc()
+        raise ValueError(f"Error processing DICOM volume: {str(e)}")
 
 def extract_dicom_metadata(dicom_path):
     """
@@ -436,10 +625,14 @@ def read_image(image_path):
     else:
         raise ValueError("Unsupported file format")
 
-def generate(model, image_path, image, context, modal, task, num_imgs, prompt, num_beams, do_sample, min_length, top_p, repetition_penalty, length_penalty, temperature):
-    if task == 'report generation' or task == 'classification':
-        prompt = '<context>' + context + '</context>' + prompt
-    img_embeds, atts_img, img_embeds_list = model.encode_img(image.unsqueeze(0), [modal])
+def generate(model, image_path, image, context, modal, task, num_imgs, prompt, num_beams, do_sample, min_length, top_p, repetition_penalty, length_penalty, temperature, already_batched=False):
+    """Generate predictions from the model."""
+    # Only unsqueeze if not already batched
+    model_input = image if already_batched else image.unsqueeze(0)
+    
+    # Get image embeddings
+    img_embeds, atts_img, img_embeds_list = model.encode_img(model_input, [modal])
+    
     placeholder = ['<ImageHere>'] * 9
     prefix = '###Human:' + ''.join([f'<img{i}>' + ''.join(placeholder) + f'</img{i}>' for i in range(num_imgs)])
     img_embeds, atts_img = model.prompt_wrap(img_embeds, atts_img, [prefix], [num_imgs])
@@ -471,18 +664,21 @@ def generate(model, image_path, image, context, modal, task, num_imgs, prompt, n
     seg_mask_2d = None
     seg_mask_3d = None
     
+    # Skip segmentation/detection if dummy paths are provided (processed tensors)
+    is_dummy_path = image_path[0].startswith("dummy_path") if isinstance(image_path, list) else image_path.startswith("dummy_path")
+    
     # Check for segmentation tokens in the predictions
-    if sum(preds == model.seg_token_idx_2d):
+    if not is_dummy_path and sum(preds == model.seg_token_idx_2d):
         seg_mask = task_seg_2d(model, preds, hidden_states, image)
         if seg_mask is not None:
             output_image, seg_mask_2d = seg_2d_process(image_path, seg_mask)
     
-    if sum(preds == model.seg_token_idx_3d):
+    if not is_dummy_path and sum(preds == model.seg_token_idx_3d):
         seg_mask = task_seg_3d(model, preds, hidden_states, img_embeds_list)
         if seg_mask is not None:
             output_image, seg_mask_3d = seg_3d_process(image_path, seg_mask)
     
-    if sum(preds == model.det_token_idx):
+    if not is_dummy_path and sum(preds == model.det_token_idx):
         det_box = task_det_2d(model, preds, hidden_states)
         output_image = det_2d_process(image_path, det_box)
     
@@ -502,21 +698,31 @@ def generate_predictions(model, images, context, prompt, modality, task, num_bea
     num_imgs = len(images)
     modal = modality.lower()
     
-    # Add error handling for image loading
     try:
-        image_tensors = [read_image(img).to(device) for img in images]
+        # Check if images are already processed tensors or file paths
+        if isinstance(images[0], torch.Tensor):
+            # Already processed images
+            image_tensors = [img.to(device) for img in images]
+        else:
+            # File paths, need to process
+            image_tensors = [read_image(img).to(device) for img in images]
+            
         if modality == 'ct':
             time.sleep(2)
         else:
             time.sleep(1)
+        
         image_tensor = torch.cat(image_tensors)
         
         with torch.autocast(device):
             with torch.no_grad():
-                generated_image, seg_mask_2d, seg_mask_3d, output_text = generate(model, images, image_tensor, context, modal, task, num_imgs, prompt, num_beams, do_sample, min_length, top_p, repetition_penalty, length_penalty, temperature)
+                # We need to handle both file paths and tensor inputs for the generate function
+                image_paths = images if not isinstance(images[0], torch.Tensor) else ["dummy_path"] * len(images)
+                generated_image, seg_mask_2d, seg_mask_3d, output_text = generate(model, image_paths, image_tensor, context, modal, task, num_imgs, prompt, num_beams, do_sample, min_length, top_p, repetition_penalty, length_penalty, temperature)
         
         return seg_mask_2d, seg_mask_3d, output_text
     except Exception as e:
         print(f"Error processing images: {e}")
+        traceback.print_exc()
         # Return empty results in case of error
         return None, None, f"Error: Could not process the image(s). {str(e)}"

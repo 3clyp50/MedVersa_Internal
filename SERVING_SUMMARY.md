@@ -55,6 +55,15 @@ The serving implementation supports all the use cases demonstrated in the origin
 3. **CT Scan Analysis:**
    - Organ segmentation (e.g., liver)
 
+## Supported Image Formats
+
+The API supports multiple file formats:
+
+- **Standard Formats:** PNG, JPG/JPEG
+- **Medical Formats:** 
+  - DICOM (both 2D and 3D series)
+  - NIfTI (.nii.gz for 3D volumes)
+
 ## Customization Options
 
 The API provides several customization options:
@@ -89,6 +98,13 @@ To deploy the MedVersa serving solution:
 - Segmentation mask visualization
 - Comprehensive error handling
 - Documentation of API endpoints and parameters
+
+## Key Features
+
+- Automatic extraction of metadata from DICOM headers
+- Support for 3D volumes (CT scans) via DICOM series or NIfTI files
+- Specialized processing for different modalities
+- Flexible hyperparameter customization
 
 ## Next Steps
 

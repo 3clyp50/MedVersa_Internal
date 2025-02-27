@@ -237,4 +237,59 @@ Error responses include a message and details:
 
 ## License
 
-[Include license information here] 
+[Include license information here]
+
+## Supported Image Formats
+
+The API supports various image formats:
+
+- **Standard Image Formats**:
+  - JPEG/JPG
+  - PNG
+
+- **Medical Image Formats**:
+  - DICOM (both single files and series)
+  - NIfTI (.nii.gz)
+
+### DICOM Support
+
+The API includes full support for DICOM files, including:
+
+- **Single DICOM files**: Useful for 2D medical imaging (e.g., X-rays)
+- **DICOM series**: For 3D medical imaging (e.g., CT scans)
+- **Metadata extraction**: The API automatically extracts patient and study information from DICOM headers to enhance the context provided to the model
+
+#### Using DICOM Files
+
+To use DICOM files with the API:
+
+1. **Single DICOM file**:
+   ```json
+   {
+     "images": [
+       {
+         "data": "base64_encoded_dicom_data",
+         "format": "dcm"
+       }
+     ],
+     "modality": "cxr",
+     "task": "report generation"
+   }
+   ```
+
+2. **DICOM series** (for 3D volumes):
+   ```json
+   {
+     "images": [
+       {
+         "data": "base64_encoded_zip_of_dicom_files",
+         "format": "dcm",
+         "is_series": true
+       }
+     ],
+     "modality": "ct",
+     "task": "segmentation"
+   }
+   ```
+
+For DICOM series, the API expects a zip file containing all DICOM files in the series, encoded as base64. 

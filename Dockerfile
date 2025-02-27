@@ -15,6 +15,9 @@ RUN pip install --no-cache-dir conda-merge \
     && conda-merge environment.yml > environment_merged.yml \
     && pip install --no-cache-dir -r environment_merged.yml
 
+# Install DICOM-specific packages
+RUN pip install --no-cache-dir pydicom SimpleITK
+
 # Copy application code
 COPY . /app/
 

@@ -9,6 +9,7 @@ import io
 import time
 import zipfile
 import tempfile
+import traceback
 
 # Server URL
 SERVER_URL = "http://localhost:5000"
@@ -86,6 +87,68 @@ def get_model_info():
         print(f"Error getting model info: {e}")
         return None
 
+def process_request(request_data):
+    """Process a request through the MedVersa API."""
+    url = f"{SERVER_URL}/predict"
+    headers = {"Content-Type": "application/json"}
+    
+    print("\nSending request to MedVersa API...")
+    try:
+        print(f"Request details: Modality={request_data['modality']}, Task={request_data['task']}")
+        print(f"Prompt: {request_data['prompt']}")
+        
+        # Send the request
+        response = requests.post(url, headers=headers, json=request_data, timeout=120)
+        
+        # Check if the request was successful
+        if response.status_code == 200:
+            print("Request successful!")
+            result = response.json()
+            
+            # Print any messages from the server
+            if "message" in result:
+                print(f"Server message: {result['message']}")
+                
+            return result
+        else:
+            print(f"\n======== ERROR RESPONSE ========")
+            print(f"Request failed with status code {response.status_code}")
+            
+            # Try to extract any error message from the response
+            try:
+                error_data = response.json()
+                if "error" in error_data:
+                    print(f"Server error: {error_data['error']}")
+                    if "traceback" in error_data:
+                        print("\nServer traceback:")
+                        print(error_data['traceback'])
+                elif "detail" in error_data:
+                    print(f"Server detail: {error_data['detail']}")
+                else:
+                    print(f"Server response data: {json.dumps(error_data, indent=2)}")
+                return error_data
+            except Exception as e:
+                print(f"Server response text (not JSON): {response.text}")
+                return {"error": response.text}
+            
+    except requests.exceptions.Timeout:
+        print(f"\n======== ERROR ========")
+        print(f"Request timed out after 120 seconds. The server might be processing a complex input.")
+        print("Try increasing the timeout value or check server status.")
+        return {"error": "Request timed out after 120 seconds"}
+    except requests.exceptions.ConnectionError:
+        print(f"\n======== ERROR ========")
+        print(f"Connection error. The server might be down or unreachable.")
+        print(f"Server URL: {SERVER_URL}")
+        print("Please check that the server is running and accessible.")
+        return {"error": "Connection error - server unreachable"}
+    except Exception as e:
+        print(f"\n======== ERROR ========")
+        print(f"Failed to send request: {str(e)}")
+        print("\nDetailed traceback:")
+        traceback.print_exc()
+        return {"error": str(e)}
+
 def predict(images, modality, task, context="", prompt="", hyperparams=None):
     """Make a prediction with the model."""
     if hyperparams is None:
@@ -109,15 +172,20 @@ def predict(images, modality, task, context="", prompt="", hyperparams=None):
             headers={"Content-Type": "application/json"}
         )
         
-        if response.status_code == 200:
+        # Always return the JSON response, even for error codes
+        # This preserves the error message from the server
+        try:
             return response.json()
-        else:
-            print(f"Error: {response.status_code}")
-            print(response.text)
-            return None
+        except json.JSONDecodeError:
+            # Return error if response is not valid JSON
+            return {
+                "error": f"Server returned status code {response.status_code}, but response is not valid JSON: {response.text[:100]}..."
+            }
     except Exception as e:
         print(f"Error making prediction: {e}")
-        return None
+        return {
+            "error": f"Connection error: {str(e)}"
+        }
 
 def example_chest_xray_report():
     """Example: Generate a report for a chest X-ray."""
@@ -227,81 +295,279 @@ def example_chest_xray_dicom(dicom_path):
     Parameters:
     dicom_path (str): Path to a chest X-ray DICOM file
     """
-    # Encode the DICOM file
-    encoded_image = encode_image(dicom_path)
+    print("\n=== Chest X-ray DICOM Report Generation ===")
     
-    # Prepare the request payload
-    data = {
-        "images": [
-            {
-                "data": encoded_image,
-                "format": "dcm"
-            }
-        ],
-        "modality": "cxr",
-        "task": "report generation",
-        "hyperparams": {
-            "temperature": 0.1,
-            "top_p": 0.9
-        }
-    }
-    
-    # Send the request to the server
-    response = requests.post(f"{SERVER_URL}/predict", json=data)
-    
-    if response.status_code != 200:
-        print(f"Error: {response.json()}")
+    if not os.path.exists(dicom_path):
+        print(f"ERROR: DICOM file not found: {dicom_path}")
+        return
+        
+    # Validate that the file is a DICOM file
+    try:
+        import pydicom
+        dicom_data = pydicom.dcmread(dicom_path)
+        print(f"DICOM loaded successfully. Modality: {dicom_data.Modality if hasattr(dicom_data, 'Modality') else 'Unknown'}")
+        print(f"Image size: {dicom_data.pixel_array.shape}")
+    except Exception as e:
+        print(f"ERROR: Cannot read as DICOM file: {str(e)}")
         return
     
-    # Print the generated report
-    result = response.json()
-    print("\nGenerated Report:")
-    print(result["text"])
+    # Encode the DICOM file
+    try:
+        encoded_image = encode_image(dicom_path)
+        print(f"DICOM file encoded successfully. Size: {len(encoded_image) // 1024} KB")
+    except Exception as e:
+        print(f"ERROR: Failed to encode DICOM file: {str(e)}")
+        return
+    
+    # Prepare the request payload
+    images = [{
+        "data": encoded_image,
+        "format": "dcm"
+    }]
+    
+    # Extract context from DICOM metadata if available
+    context = ""
+    try:
+        if hasattr(dicom_data, 'PatientAge'):
+            context += f"Age: {dicom_data.PatientAge}.\n"
+        if hasattr(dicom_data, 'PatientSex'):
+            gender = "Male" if dicom_data.PatientSex == "M" else "Female" if dicom_data.PatientSex == "F" else dicom_data.PatientSex
+            context += f"Gender: {gender}.\n"
+        if hasattr(dicom_data, 'BodyPartExamined'):
+            context += f"Body part: {dicom_data.BodyPartExamined}.\n"
+    except:
+        # If metadata extraction fails, use generic context
+        context = "Patient information unknown."
+    
+    # Prompt
+    prompt = "How would you characterize the findings from <img0>?"
+    
+    print("Sending DICOM to server for analysis...")
+    
+    # Make the prediction
+    result = predict(images, "cxr", "report generation", context, prompt)
+    
+    if result:
+        print("\nGenerated Report:")
+        print(result["text"])
+        print(f"\nProcessing time: {result['processing_time']:.2f} seconds")
 
-def example_ct_scan_dicom_series(dicom_series_dir):
+def encode_dicom_file_or_series(dicom_path):
     """
-    Example of analyzing a CT scan from a DICOM series.
+    Encode a DICOM file or directory of DICOM files for transmission.
+    Automatically detects whether the input is a single DICOM volume file or a series.
     
     Parameters:
-    dicom_series_dir (str): Path to a directory containing DICOM series of a CT scan
-    """
-    # Encode the DICOM series as a zip file
-    encoded_series = encode_dicom_series(dicom_series_dir)
+    dicom_path (str): Path to a DICOM file or directory containing DICOM files
     
-    # Prepare the request payload
-    data = {
+    Returns:
+    dict: Dictionary with encoded data and is_series flag
+    """
+    import pydicom
+    
+    if os.path.isdir(dicom_path):
+        # Handle directory of DICOM files
+        print(f"Processing directory of DICOM files: {dicom_path}")
+        encoded_series = encode_dicom_series(dicom_path)
+        return {
+            "data": encoded_series,
+            "is_series": True
+        }
+    elif os.path.isfile(dicom_path):
+        # Check if the file is a DICOM volume
+        try:
+            dicom_data = pydicom.dcmread(dicom_path)
+            if hasattr(dicom_data, 'NumberOfFrames') and int(dicom_data.NumberOfFrames) > 1:
+                # This is a DICOM volume file
+                print(f"Detected single DICOM volume file with {dicom_data.NumberOfFrames} frames")
+                encoded_file = encode_image(dicom_path)
+                return {
+                    "data": encoded_file,
+                    "is_series": True  # Treat as series for 3D processing
+                }
+            else:
+                # Regular 2D DICOM
+                print("DICOM file appears to be a 2D image")
+                encoded_file = encode_image(dicom_path)
+                return {
+                    "data": encoded_file,
+                    "is_series": False
+                }
+        except Exception as e:
+            print(f"Error reading DICOM file: {str(e)}")
+            # Fallback to regular encoding
+            encoded_file = encode_image(dicom_path)
+            return {
+                "data": encoded_file,
+                "is_series": False
+            }
+    else:
+        raise ValueError(f"Path does not exist: {dicom_path}")
+
+def example_ct_scan_dicom_series(dicom_path):
+    """
+    Example of analyzing a CT scan from a DICOM series or volume file.
+    
+    Parameters:
+    dicom_path (str): Path to a directory containing DICOM series or a DICOM volume file
+    """
+    print("\n=== DICOM Volume Analysis ===")
+    
+    if not os.path.exists(dicom_path):
+        print(f"ERROR: Path not found: {dicom_path}")
+        return
+    
+    # Variables to store detected modality
+    modality = "ct"  # Default to CT if can't detect
+    modality_name = "CT Scan"
+    
+    # Validate the DICOM path
+    if os.path.isdir(dicom_path):
+        # Directory of DICOM files
+        dicom_files = [f for f in os.listdir(dicom_path) if f.lower().endswith('.dcm')]
+        if not dicom_files:
+            print(f"ERROR: No DICOM files found in the directory: {dicom_path}")
+            return
+        print(f"Found {len(dicom_files)} DICOM files in the series.")
+        
+        # Validate first DICOM file
+        try:
+            import pydicom
+            sample_dicom = os.path.join(dicom_path, dicom_files[0])
+            dicom_data = pydicom.dcmread(sample_dicom)
+            detected_modality = dicom_data.Modality if hasattr(dicom_data, 'Modality') else "Unknown"
+            print(f"DICOM series modality: {detected_modality}")
+            
+            # Set appropriate modality based on DICOM type
+            if detected_modality == "CR" or detected_modality == "DX" or detected_modality == "XA":
+                modality = "cxr"
+                modality_name = "X-ray"
+            elif detected_modality == "CT":
+                modality = "ct"
+                modality_name = "CT Scan"
+            elif detected_modality == "MR":
+                modality = "ct"  # Use CT for MRI as it's closest supported modality
+                modality_name = "MRI Scan"
+            
+        except Exception as e:
+            print(f"WARNING: Cannot validate DICOM series: {str(e)}")
+        
+    elif os.path.isfile(dicom_path):
+        # Single DICOM file - check if it's a volume
+        try:
+            import pydicom
+            dicom_data = pydicom.dcmread(dicom_path)
+            detected_modality = dicom_data.Modality if hasattr(dicom_data, 'Modality') else "Unknown"
+            
+            # Set appropriate modality based on DICOM type
+            if detected_modality == "CR" or detected_modality == "DX" or detected_modality == "XA":
+                modality = "cxr"
+                modality_name = "X-ray"
+            elif detected_modality == "CT":
+                modality = "ct"
+                modality_name = "CT Scan"
+            elif detected_modality == "MR":
+                modality = "ct"  # Use CT for MRI as it's closest supported modality
+                modality_name = "MRI Scan"
+                
+            if hasattr(dicom_data, 'NumberOfFrames') and int(dicom_data.NumberOfFrames) > 1:
+                print(f"DICOM volume file with {dicom_data.NumberOfFrames} frames, modality: {detected_modality}")
+            else:
+                print(f"Single DICOM file with modality: {detected_modality}")
+        except Exception as e:
+            print(f"WARNING: Cannot validate DICOM file: {str(e)}")
+    else:
+        print(f"ERROR: Path is neither a file nor a directory: {dicom_path}")
+        return
+    
+    print(f"Using modality: {modality} ({modality_name})")
+    
+    # Encode the DICOM file or series
+    try:
+        print("Packaging and encoding DICOM data (this may take a moment)...")
+        encoded_result = encode_dicom_file_or_series(dicom_path)
+        print(f"DICOM data encoded successfully. Size: {len(encoded_result['data']) // 1024} KB")
+    except Exception as e:
+        print(f"ERROR: Failed to encode DICOM data: {str(e)}")
+        return
+    
+    # Extract context from DICOM metadata if available
+    context = ""
+    try:
+        if 'dicom_data' in locals():
+            if hasattr(dicom_data, 'PatientAge'):
+                context += f"Age: {dicom_data.PatientAge}.\n"
+            if hasattr(dicom_data, 'PatientSex'):
+                gender = "Male" if dicom_data.PatientSex == "M" else "Female" if dicom_data.PatientSex == "F" else dicom_data.PatientSex
+                context += f"Gender: {gender}.\n"
+            if hasattr(dicom_data, 'BodyPartExamined'):
+                context += f"Body part: {dicom_data.BodyPartExamined}.\n"
+            if hasattr(dicom_data, 'StudyDescription'):
+                context += f"Study: {dicom_data.StudyDescription}.\n"
+    except Exception as e:
+        print(f"WARNING: Error extracting DICOM metadata: {str(e)}")
+    
+    # Determine appropriate prompt based on modality
+    prompt = ""
+    task = "segmentation"
+    
+    if modality == "cxr":
+        prompt = "Describe the findings from <img0>."
+        task = "report generation"
+    elif modality == "ct":
+        prompt = "Segment the liver."
+        task = "segmentation"
+    
+    # Prepare the request
+    request_data = {
         "images": [
             {
-                "data": encoded_series,
+                "data": encoded_result["data"],
                 "format": "dcm",
-                "is_series": True
+                "is_series": encoded_result["is_series"]
             }
         ],
-        "modality": "ct",
-        "task": "report generation",
+        "context": context,
+        "prompt": prompt,
+        "modality": modality,
+        "task": task,
         "hyperparams": {
-            "temperature": 0.2,
-            "top_p": 0.9
+            "num_beams": 1,
+            "do_sample": True,
+            "temperature": 0.1
         }
     }
     
-    print("Sending CT scan to server (this may take some time)...")
-    
-    # Send the request to the server
-    response = requests.post(f"{SERVER_URL}/predict", json=data)
-    
-    if response.status_code != 200:
-        print(f"Error: {response.json()}")
-        return
-    
-    # Print the generated report
-    result = response.json()
-    print("\nGenerated CT Report:")
-    print(result["text"])
-    
-    # Process segmentation if available
-    if "segmentation_3d" in result:
-        print("\nSegmentation masks available. These would need specialized 3D visualization.")
+    # Send to server
+    print("Sending DICOM data to server for analysis (this may take some time)...")
+    try:
+        response = process_request(request_data)
+        
+        if not response:
+            print("\nERROR: No response received from server")
+            return
+            
+        if "error" in response:
+            print(f"\nERROR from server: {response['error']}")
+            return
+        
+        print("\nModel Response:")
+        print(response['text'])
+        
+        if 'segmentation_mask' in response:
+            print("\nSegmentation mask generated.")
+            if 'is_3d' in response and response['is_3d']:
+                print(f"3D segmentation with {len(response['segmentation_mask'])} slices")
+            else:
+                print("2D segmentation")
+        else:
+            print("\nNo segmentation mask in response.")
+            
+    except Exception as e:
+        print(f"ERROR: Failed to get prediction: {str(e)}")
+        traceback.print_exc()
+        
+    print("Analysis complete.")
 
 if __name__ == "__main__":
     # Check if the server is running
@@ -337,7 +603,7 @@ if __name__ == "__main__":
         dicom_path = input("Enter the path to a chest X-ray DICOM file: ")
         example_chest_xray_dicom(dicom_path)
     elif choice == '5':
-        dicom_dir = input("Enter the path to a directory containing CT DICOM series: ")
-        example_ct_scan_dicom_series(dicom_dir)
+        dicom_path = input("Enter the path to a directory containing CT DICOM series or a DICOM volume file: ")
+        example_ct_scan_dicom_series(dicom_path)
     else:
         print("Invalid choice!") 
