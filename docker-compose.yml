@@ -1,0 +1,24 @@
+version: '3'
+
+services:
+  medversa-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - HF_TOKEN=${HF_TOKEN}
+    ports:
+      - "5000:5000"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - PORT=5000
+    volumes:
+      - ./demo_ex:/app/demo_ex
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped 

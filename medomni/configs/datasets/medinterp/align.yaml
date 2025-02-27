@@ -1,0 +1,5 @@
+datasets:
+  med:
+    data_type: images
+    build_info:
+      storage: json_files/medinterp

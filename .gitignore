@@ -1,0 +1,5 @@
+# Ignore common unwanted files globally
+**/.DS_Store
+**/.env
+**/__pycache__/
+**/.conda/

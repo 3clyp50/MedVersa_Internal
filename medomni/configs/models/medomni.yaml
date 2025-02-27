@@ -1,0 +1,12 @@
+model:
+  arch: medomni
+
+  # vision encoder
+  precision: "fp16"
+  freeze_vit: True
+
+  # Llama
+  llama_model: "meta-llama/Llama-2-7b-chat-hf"
+
+  # generation configs
+  prompt: ""

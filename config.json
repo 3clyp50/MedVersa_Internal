@@ -1,0 +1,1 @@
+{"arch": "medomni", "precision": "fp16", "llama_model": "meta-llama/Llama-2-7b-chat-hf", "model_type": "medomni", "max_txt_len": 256, "end_sym": "###"}
