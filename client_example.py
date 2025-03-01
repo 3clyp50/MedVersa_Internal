@@ -10,6 +10,7 @@ import time
 import zipfile
 import tempfile
 import traceback
+import pydicom
 
 # Server URL
 SERVER_URL = "http://localhost:5000"
@@ -303,8 +304,7 @@ def example_chest_xray_dicom(dicom_path):
         
     # Validate that the file is a DICOM file
     try:
-        import pydicom
-        dicom_data = pydicom.dcmread(dicom_path)
+        dicom_data = pydicom.dcmread(dicom_path, force=True)
         print(f"DICOM loaded successfully. Modality: {dicom_data.Modality if hasattr(dicom_data, 'Modality') else 'Unknown'}")
         print(f"Image size: {dicom_data.pixel_array.shape}")
     except Exception as e:
@@ -363,8 +363,6 @@ def encode_dicom_file_or_series(dicom_path):
     Returns:
     dict: Dictionary with encoded data and is_series flag
     """
-    import pydicom
-    
     if os.path.isdir(dicom_path):
         # Handle directory of DICOM files
         print(f"Processing directory of DICOM files: {dicom_path}")
@@ -376,7 +374,7 @@ def encode_dicom_file_or_series(dicom_path):
     elif os.path.isfile(dicom_path):
         # Check if the file is a DICOM volume
         try:
-            dicom_data = pydicom.dcmread(dicom_path)
+            dicom_data = pydicom.dcmread(dicom_path, force=True)
             if hasattr(dicom_data, 'NumberOfFrames') and int(dicom_data.NumberOfFrames) > 1:
                 # This is a DICOM volume file
                 print(f"Detected single DICOM volume file with {dicom_data.NumberOfFrames} frames")
@@ -432,9 +430,7 @@ def example_ct_scan_dicom_series(dicom_path):
         
         # Validate first DICOM file
         try:
-            import pydicom
-            sample_dicom = os.path.join(dicom_path, dicom_files[0])
-            dicom_data = pydicom.dcmread(sample_dicom)
+            dicom_data = pydicom.dcmread(os.path.join(dicom_path, dicom_files[0]), force=True)
             detected_modality = dicom_data.Modality if hasattr(dicom_data, 'Modality') else "Unknown"
             print(f"DICOM series modality: {detected_modality}")
             
@@ -455,8 +451,7 @@ def example_ct_scan_dicom_series(dicom_path):
     elif os.path.isfile(dicom_path):
         # Single DICOM file - check if it's a volume
         try:
-            import pydicom
-            dicom_data = pydicom.dcmread(dicom_path)
+            dicom_data = pydicom.dcmread(dicom_path, force=True)
             detected_modality = dicom_data.Modality if hasattr(dicom_data, 'Modality') else "Unknown"
             
             # Set appropriate modality based on DICOM type
@@ -568,6 +563,222 @@ def example_ct_scan_dicom_series(dicom_path):
         traceback.print_exc()
         
     print("Analysis complete.")
+
+def send_dicom_file(dicom_path, context=None, prompt=None, modality=None, task=None):
+    """
+    Send a DICOM file to the server for processing.
+    
+    Args:
+        dicom_path (str): Path to the DICOM file
+        context (str, optional): Additional context for the model
+        prompt (str, optional): Specific prompt for the model
+        modality (str, optional): Medical modality of the image
+        task (str, optional): Task to perform (e.g., "segmentation")
+        
+    Returns:
+        dict: Server response
+    """
+    try:
+        # Read DICOM file
+        dicom_data = pydicom.dcmread(dicom_path, force=True)
+        
+        # Extract metadata
+        metadata = {}
+        for tag in dicom_data.dir():
+            if tag not in ['PixelData']:
+                try:
+                    value = getattr(dicom_data, tag)
+                    if isinstance(value, (str, int, float)):
+                        metadata[tag] = str(value)
+                except:
+                    pass
+        
+        # Convert to bytes
+        with open(dicom_path, 'rb') as f:
+            file_bytes = f.read()
+        
+        # Prepare request data
+        files = {'file': ('image.dcm', file_bytes, 'application/dicom')}
+        data = {}
+        
+        if context:
+            data['context'] = context
+        if prompt:
+            data['prompt'] = prompt
+        if modality:
+            data['modality'] = modality
+        if task:
+            data['task'] = task
+        
+        # Send request
+        response = requests.post(f"{SERVER_URL}/process_dicom", files=files, data=data)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"Error: {response.status_code} - {response.text}")
+            return {"error": f"Server error: {response.status_code}"}
+    
+    except Exception as e:
+        print(f"Error sending DICOM file: {str(e)}")
+        return {"error": str(e)}
+
+def send_dicom_series(dicom_dir, context=None, prompt=None, modality=None, task=None):
+    """
+    Send a DICOM series (directory of DICOM files) to the server for processing.
+    
+    Args:
+        dicom_dir (str): Path to the directory containing DICOM files
+        context (str, optional): Additional context for the model
+        prompt (str, optional): Specific prompt for the model
+        modality (str, optional): Medical modality of the image
+        task (str, optional): Task to perform (e.g., "segmentation")
+        
+    Returns:
+        dict: Server response
+    """
+    try:
+        # Find all DICOM files in the directory
+        dicom_files = []
+        for root, _, files in os.walk(dicom_dir):
+            for file in files:
+                if file.lower().endswith('.dcm'):
+                    dicom_files.append(os.path.join(root, file))
+        
+        if not dicom_files:
+            return {"error": "No DICOM files found in the directory"}
+        
+        # Read the first file to get metadata
+        dicom_data = pydicom.dcmread(dicom_files[0], force=True)
+        
+        # Extract metadata from the first file
+        metadata = {}
+        for tag in dicom_data.dir():
+            if tag not in ['PixelData']:
+                try:
+                    value = getattr(dicom_data, tag)
+                    if isinstance(value, (str, int, float)):
+                        metadata[tag] = str(value)
+                except:
+                    pass
+        
+        # Create a zip file containing all DICOM files
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for file_path in dicom_files:
+                # Add each file to the zip with a relative path
+                arcname = os.path.basename(file_path)
+                zip_file.write(file_path, arcname)
+        
+        # Reset buffer position
+        zip_buffer.seek(0)
+        
+        # Prepare request data
+        files = {'file': ('dicom_series.zip', zip_buffer.getvalue(), 'application/zip')}
+        data = {}
+        
+        if context:
+            data['context'] = context
+        if prompt:
+            data['prompt'] = prompt
+        if modality:
+            data['modality'] = modality
+        if task:
+            data['task'] = task
+        
+        # Send request
+        response = requests.post(f"{SERVER_URL}/process_dicom_series", files=files, data=data)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"Error: {response.status_code} - {response.text}")
+            return {"error": f"Server error: {response.status_code}"}
+    
+    except Exception as e:
+        print(f"Error sending DICOM series: {str(e)}")
+        return {"error": str(e)}
+
+def example_dicom():
+    """Example of sending a DICOM file for processing."""
+    # Path to a sample DICOM file
+    sample_dicom = os.path.join(SAMPLE_DIR, "sample.dcm")
+    
+    # Check if the file exists
+    if not os.path.exists(sample_dicom):
+        print(f"Sample DICOM file not found at {sample_dicom}")
+        return
+    
+    # Read DICOM file to get metadata
+    try:
+        dicom_data = pydicom.dcmread(sample_dicom, force=True)
+        print(f"DICOM info - Modality: {dicom_data.Modality if hasattr(dicom_data, 'Modality') else 'Unknown'}")
+        print(f"DICOM info - Body part: {dicom_data.BodyPartExamined if hasattr(dicom_data, 'BodyPartExamined') else 'Unknown'}")
+    except Exception as e:
+        print(f"Error reading DICOM file: {str(e)}")
+        return
+    
+    # Send the DICOM file
+    print("\nSending DICOM file for processing...")
+    response = send_dicom_file(
+        sample_dicom,
+        context="Patient with chest pain",
+        prompt="Describe what you see in this image and identify any abnormalities.",
+        modality="CT",
+        task="description"
+    )
+    
+    # Print the response
+    print("\nServer response:")
+    print(json.dumps(response, indent=2))
+
+def example_dicom_series():
+    """Example of sending a DICOM series for processing."""
+    # Path to a sample DICOM series directory
+    sample_dicom_dir = os.path.join(SAMPLE_DIR, "dicom_series")
+    
+    # Check if the directory exists
+    if not os.path.exists(sample_dicom_dir) or not os.path.isdir(sample_dicom_dir):
+        print(f"Sample DICOM series directory not found at {sample_dicom_dir}")
+        return
+    
+    # Find a DICOM file in the directory
+    dicom_files = []
+    for root, _, files in os.walk(sample_dicom_dir):
+        for file in files:
+            if file.lower().endswith('.dcm'):
+                dicom_files.append(os.path.join(root, file))
+                break
+        if dicom_files:
+            break
+    
+    if not dicom_files:
+        print(f"No DICOM files found in {sample_dicom_dir}")
+        return
+    
+    # Read a DICOM file to get metadata
+    dicom_path = dicom_files[0]
+    try:
+        dicom_data = pydicom.dcmread(dicom_path, force=True)
+        print(f"DICOM series info - Modality: {dicom_data.Modality if hasattr(dicom_data, 'Modality') else 'Unknown'}")
+        print(f"DICOM series info - Body part: {dicom_data.BodyPartExamined if hasattr(dicom_data, 'BodyPartExamined') else 'Unknown'}")
+    except Exception as e:
+        print(f"Error reading DICOM file: {str(e)}")
+        return
+    
+    # Send the DICOM series
+    print("\nSending DICOM series for processing...")
+    response = send_dicom_series(
+        sample_dicom_dir,
+        context="Patient with abdominal pain",
+        prompt="Describe what you see in this series and identify any abnormalities.",
+        modality="CT",
+        task="description"
+    )
+    
+    # Print the response
+    print("\nServer response:")
+    print(json.dumps(response, indent=2))
 
 if __name__ == "__main__":
     # Check if the server is running

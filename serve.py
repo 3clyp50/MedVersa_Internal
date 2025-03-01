@@ -14,6 +14,7 @@ import torch
 from PIL import Image
 from huggingface_hub import HfFolder
 import torchio as tio
+import pydicom
 
 # Import everything needed from utils instead of non-existent model.py
 from utils import (
@@ -180,7 +181,7 @@ def process_dicom_data(base64_string):
                 temp_file.close()
                 
                 # Check if it's a multi-frame DICOM
-                ds = pydicom.dcmread(temp_file.name)
+                ds = pydicom.dcmread(temp_file.name, force=True)
                 if hasattr(ds, 'NumberOfFrames') and int(ds.NumberOfFrames) > 1:
                     print(f"Found multi-frame DICOM with {ds.NumberOfFrames} frames")
                     # Process as volume
@@ -231,7 +232,7 @@ def load_and_preprocess_single_dicom(file_path):
     from PIL import Image
     
     # Read DICOM file
-    dicom = pydicom.dcmread(file_path)
+    dicom = pydicom.dcmread(file_path, force=True)
     
     # Extract pixel array
     try:
@@ -282,7 +283,7 @@ def load_and_preprocess_dicom_series(directory_path):
     # Sort files (if they represent a series, this is important)
     try:
         # Try to sort by InstanceNumber if available
-        dicom_files = sorted(dicom_files, key=lambda f: pydicom.dcmread(f, stop_before_pixels=True).InstanceNumber)
+        dicom_files = sorted(dicom_files, key=lambda f: pydicom.dcmread(f, stop_before_pixels=True, force=True).InstanceNumber)
     except:
         # Fall back to simple filename sort
         dicom_files = sorted(dicom_files)
@@ -309,7 +310,7 @@ def load_and_preprocess_dicom_volume(file_path):
     from PIL import Image
     
     # Read DICOM file
-    dicom = pydicom.dcmread(file_path)
+    dicom = pydicom.dcmread(file_path, force=True)
     
     if not hasattr(dicom, 'NumberOfFrames') or int(dicom.NumberOfFrames) <= 1:
         raise ValueError("Not a multi-frame DICOM volume")

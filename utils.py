@@ -310,7 +310,7 @@ def load_and_preprocess_dicom(dicom_path, is_series=False):
     # If is_series is True but dicom_path is a file, check if it's a volume DICOM file
     if is_series and os.path.isfile(dicom_path):
         try:
-            dicom = pydicom.dcmread(dicom_path)
+            dicom = pydicom.dcmread(dicom_path, force=True)
             # Check if this is a multi-frame DICOM with 3D data
             if hasattr(dicom, 'NumberOfFrames') and int(dicom.NumberOfFrames) > 1:
                 print(f"Detected single DICOM volume file with {dicom.NumberOfFrames} frames")
@@ -340,7 +340,8 @@ def load_and_preprocess_dicom_image(dicom_path):
     """
     # Read DICOM file
     try:
-        dicom = pydicom.dcmread(dicom_path)
+        # Use force=True to handle files without proper DICOM headers
+        dicom = pydicom.dcmread(dicom_path, force=True)
         print(f"DICOM info - Shape: {dicom.pixel_array.shape}, Type: {dicom.pixel_array.dtype}")
     except Exception as e:
         raise ValueError(f"Error reading DICOM file: {str(e)}")
@@ -465,7 +466,7 @@ def load_and_preprocess_dicom_series(dicom_dir):
                 raise ValueError(f"No DICOM files found in {dicom_dir}")
             
             # Sort by instance number if available
-            slices = [pydicom.dcmread(f) for f in dicom_files]
+            slices = [pydicom.dcmread(f, force=True) for f in dicom_files]
             slices.sort(key=lambda x: int(x.InstanceNumber) if hasattr(x, 'InstanceNumber') else 0)
             
             # Extract pixel data
@@ -505,7 +506,7 @@ def load_and_preprocess_dicom_volume(dicom_path):
     """
     try:
         # Load the DICOM dataset
-        dicom = pydicom.dcmread(dicom_path)
+        dicom = pydicom.dcmread(dicom_path, force=True)
         print(f"DICOM volume info - Path: {dicom_path}")
         print(f"  - Has NumberOfFrames: {hasattr(dicom, 'NumberOfFrames')}")
         if hasattr(dicom, 'NumberOfFrames'):
@@ -573,7 +574,8 @@ def extract_dicom_metadata(dicom_path):
     dict: Dictionary containing metadata
     """
     try:
-        dicom = pydicom.dcmread(dicom_path)
+        # Use force=True to handle files without proper DICOM headers
+        dicom = pydicom.dcmread(dicom_path, force=True)
         metadata = {}
         
         # Extract patient information
@@ -606,24 +608,62 @@ def extract_dicom_metadata(dicom_path):
         return {}
 
 def read_image(image_path):
+    """
+    Read and preprocess an image file for the model.
+    
+    Parameters:
+    image_path (str): Path to the image file
+    
+    Returns:
+    torch.Tensor: Preprocessed image tensor
+    """
     # Check if file exists
     if not os.path.exists(image_path):
+        print(f"Error: Image file not found: {image_path}")
         raise FileNotFoundError(f"Image file not found: {image_path}")
     
     # Check if file is empty
-    if os.path.getsize(image_path) == 0:
+    file_size = os.path.getsize(image_path)
+    if file_size == 0:
+        print(f"Error: Image file is empty: {image_path}")
         raise ValueError(f"Image file is empty: {image_path}")
-        
-    if image_path.endswith(('.jpg', '.jpeg', '.png')):
-        return load_and_preprocess_image(Image.open(image_path).convert('RGB'))
-    elif image_path.endswith('.nii.gz'):
-        return load_and_preprocess_volume(image_path)
-    elif image_path.endswith('.dcm'):
-        return load_and_preprocess_dicom(image_path, is_series=False)
-    elif os.path.isdir(image_path) and any(f.endswith('.dcm') for f in os.listdir(image_path)):
-        return load_and_preprocess_dicom(image_path, is_series=True)
     else:
-        raise ValueError("Unsupported file format")
+        print(f"Image file size: {file_size} bytes")
+        
+    # Determine file type and process accordingly
+    if image_path.endswith(('.jpg', '.jpeg', '.png')):
+        print(f"Processing as standard image: {image_path}")
+        try:
+            img = Image.open(image_path).convert('RGB')
+            print(f"Image loaded successfully: {img.size}")
+            return load_and_preprocess_image(img)
+        except Exception as e:
+            print(f"Error loading image: {str(e)}")
+            raise
+    elif image_path.endswith('.nii.gz'):
+        print(f"Processing as NIFTI volume: {image_path}")
+        try:
+            return load_and_preprocess_volume(image_path)
+        except Exception as e:
+            print(f"Error loading NIFTI volume: {str(e)}")
+            raise
+    elif image_path.endswith('.dcm'):
+        print(f"Processing as DICOM file: {image_path}")
+        try:
+            return load_and_preprocess_dicom(image_path, is_series=False)
+        except Exception as e:
+            print(f"Error loading DICOM file: {str(e)}")
+            raise
+    elif os.path.isdir(image_path) and any(f.endswith('.dcm') for f in os.listdir(image_path)):
+        print(f"Processing as DICOM series directory: {image_path}")
+        try:
+            return load_and_preprocess_dicom(image_path, is_series=True)
+        except Exception as e:
+            print(f"Error loading DICOM series: {str(e)}")
+            raise
+    else:
+        print(f"Unsupported file format: {image_path}")
+        raise ValueError(f"Unsupported file format: {image_path}")
 
 def generate(model, image_path, image, context, modal, task, num_imgs, prompt, num_beams, do_sample, min_length, top_p, repetition_penalty, length_penalty, temperature, already_batched=False):
     """Generate predictions from the model."""
