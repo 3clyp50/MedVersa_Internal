@@ -675,11 +675,26 @@ def generate(model, image_path, image, context, modal, task, num_imgs, prompt, n
     
     placeholder = ['<ImageHere>'] * 9
     prefix = '###Human:' + ''.join([f'<img{i}>' + ''.join(placeholder) + f'</img{i}>' for i in range(num_imgs)])
+    
+    # Add context in the correct format if provided
+    if context:
+        prefix += context
+    
     img_embeds, atts_img = model.prompt_wrap(img_embeds, atts_img, [prefix], [num_imgs])
-    prompt += '###Assistant:'
-    prompt_tokens = model.llama_tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(image.device)
+    
+    # Use the simple prompt format that works in client_example.py
+    if task == "report generation" and not prompt:
+        prompt = "How would you characterize the findings from <img0>?"
+    elif task == "classification" and not prompt:
+        prompt = "What is the primary diagnosis?"
+    
+    prompt_with_context = prompt + '###Assistant:'
+    
+    # Tokenize the prompt
+    prompt_tokens = model.llama_tokenizer(prompt_with_context, return_tensors="pt", add_special_tokens=False).to(image.device)
     new_img_embeds, new_atts_img = model.prompt_concat(img_embeds, atts_img, prompt_tokens)
     
+    # Use the same parameters as the working example
     outputs = model.llama_model.generate(
         inputs_embeds=new_img_embeds,
         max_new_tokens=450,
